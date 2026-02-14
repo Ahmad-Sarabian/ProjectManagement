@@ -4,7 +4,13 @@ import { Feature, TaskStatus } from "../types";
 
 export const analyzeProjectData = async (features: Feature[]): Promise<string> => {
   // Always obtain API key exclusively from process.env.API_KEY.
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  const apiKey = process.env.API_KEY;
+
+  if (!apiKey) {
+    return "کلید API یافت نشد. لطفاً تنظیمات محیطی (Environment Variables) خود را بررسی کنید.";
+  }
+
+  const ai = new GoogleGenAI({ apiKey: apiKey });
   
   // Compact the data to reduce payload size and prevent RPC/Proxy errors
   const compactData = features.map(f => ({
