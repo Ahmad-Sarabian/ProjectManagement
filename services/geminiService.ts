@@ -41,6 +41,7 @@ export const analyzeProjectData = async (features: Feature[]): Promise<string> =
   `;
 
   try {
+    // Attempt 1: Try with the Pro model and Thinking Config
     const response = await ai.models.generateContent({
       model: "gemini-3-pro-preview",
       contents: prompt,
@@ -50,16 +51,39 @@ export const analyzeProjectData = async (features: Feature[]): Promise<string> =
       },
     });
 
-    // Access the .text property directly.
     return response.text || "خطا در دریافت پاسخ از هوش مصنوعی.";
   } catch (error: any) {
-    console.error("Gemini Analysis Error Detail:", error);
+    console.warn("Gemini Pro Analysis failed, attempting fallback to Flash...", error);
     
-    // Fallback message if the RPC still fails
-    if (error?.message?.includes('500') || error?.message?.includes('xhr')) {
-      return "خطای سیستمی در ارتباط با سرور هوش مصنوعی (RPC 500). این مشکل معمولاً موقتی است. لطفاً چند لحظه دیگر دوباره تلاش کنید.";
+    try {
+        // Attempt 2: Fallback to Flash model (lighter, often avoids XHR timeout/size issues)
+        const fallbackResponse = await ai.models.generateContent({
+            model: "gemini-3-flash-preview",
+            contents: prompt,
+            config: {
+                temperature: 0.7,
+            },
+        });
+        return fallbackResponse.text || "خطا در دریافت پاسخ از هوش مصنوعی (مدل جایگزین).";
+    } catch (fallbackError: any) {
+        console.error("Gemini Fallback Error:", fallbackError);
+        
+        // Detailed user-friendly error message
+        if (fallbackError?.message?.includes('500') || fallbackError?.message?.includes('xhr') || fallbackError?.message?.includes('fetch')) {
+            return `
+### خطای ارتباط با سرور
+متاسفانه ارتباط با سرور هوش مصنوعی برقرار نشد (Error 500/XHR).
+
+**دلایل احتمالی:**
+۱. اختلال در شبکه اینترنت یا اتصال VPN.
+۲. مسدود شدن درخواست توسط مرورگر (AdBlocker یا تنظیمات امنیتی).
+۳. ترافیک بالای سرورهای گوگل.
+
+*لطفاً چند لحظه صبر کنید و دوباره تلاش کنید.*
+            `;
+        }
+        
+        return "متاسفانه مشکلی در تحلیل هوشمند پیش آمد. لطفاً دوباره تلاش کنید.";
     }
-    
-    return "متاسفانه مشکلی در تحلیل هوشمند پیش آمد. لطفاً از صحت تنظیمات اطمینان حاصل کرده و دوباره تلاش کنید.";
   }
 };

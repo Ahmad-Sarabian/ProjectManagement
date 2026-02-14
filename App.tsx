@@ -16,6 +16,60 @@ interface ContextMenuState {
   currentStatus: TaskStatus;
 }
 
+// Helper function to calculate the overall stage of a feature based on user rules
+const getFeatureStage = (feature: Feature): 'WAITING' | 'PRODUCT_DESIGN' | 'IMPLEMENTATION' | 'TEST' | 'COMPLETED' => {
+  const s = feature.teamStatuses;
+  
+  // Rule: Waiting (If Product hasn't really started yet)
+  if (s[TeamName.PRODUCT] === TaskStatus.WAITING || s[TeamName.PRODUCT] === TaskStatus.NONE) {
+    return 'WAITING';
+  }
+
+  // Rule 1: Product & Design
+  // "هر فیچری که در آن وضعیت تیم محصول و دیزاین تکمیل شده نباشد"
+  if (s[TeamName.PRODUCT] !== TaskStatus.COMPLETED || s[TeamName.DESIGN] !== TaskStatus.COMPLETED) {
+    return 'PRODUCT_DESIGN';
+  }
+
+  // Rule 2: Implementation
+  // "محصول و دیزاین تکمیل شده باشند و (بک اند 1 یا بک اند 2 یا فرانت اند) تکمیل شده نباشند"
+  const isBack1Done = s[TeamName.BACKEND1] === TaskStatus.COMPLETED || s[TeamName.BACKEND1] === TaskStatus.NONE;
+  const isBack2Done = s[TeamName.BACKEND2] === TaskStatus.COMPLETED || s[TeamName.BACKEND2] === TaskStatus.NONE;
+  const isFrontDone = s[TeamName.FRONTEND] === TaskStatus.COMPLETED || s[TeamName.FRONTEND] === TaskStatus.NONE;
+
+  if (!isBack1Done || !isBack2Done || !isFrontDone) {
+    return 'IMPLEMENTATION';
+  }
+
+  // Rule 3: Test
+  // "تیمهای قبل از تست تکمیل شده باشد ولی تست هنوز تکمیل شده نباشد"
+  if (s[TeamName.QA] !== TaskStatus.COMPLETED && s[TeamName.QA] !== TaskStatus.NONE) {
+    return 'TEST';
+  }
+
+  // Rule 4: Completed
+  // "تمام تیمهای درگیر در وضعیت تکمیل شده باشند" (Including Release/Delivery)
+  const isReleaseDone = s[TeamName.RELEASE] === TaskStatus.COMPLETED || s[TeamName.RELEASE] === TaskStatus.NONE;
+  
+  if (isReleaseDone) {
+    return 'COMPLETED';
+  }
+
+  // Edge Case: QA done but Release is pending -> Group into Test/Deployment phase
+  return 'TEST';
+};
+
+const getStageLabel = (stage: string) => {
+  switch (stage) {
+    case 'WAITING': return 'در انتظار شروع';
+    case 'PRODUCT_DESIGN': return 'محصول و دیزاین';
+    case 'IMPLEMENTATION': return 'پیاده‌سازی';
+    case 'TEST': return 'تست و انتشار';
+    case 'COMPLETED': return 'تکمیل شده';
+    default: return '';
+  }
+};
+
 const App: React.FC = () => {
   const [features, setFeatures] = useState<Feature[]>(INITIAL_FEATURES);
   const [selectedFeature, setSelectedFeature] = useState<Feature | null>(null);
@@ -26,24 +80,47 @@ const App: React.FC = () => {
   const [searchTerm, setSearchTerm] = useState('');
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
 
-  // Extract unique project names for the creation modal
+  // Advanced Filters State
+  const [showFilters, setShowFilters] = useState(false);
+  const [filterProject, setFilterProject] = useState<string>('ALL');
+  const [filterPriority, setFilterPriority] = useState<string>('ALL');
+  
+  // Updated filterStatus to string to handle new stage keys
+  const [filterStatus, setFilterStatus] = useState<string>('ALL');
+
+  // Extract unique project names for the creation modal and filters
   const availableProjects = useMemo(() => {
     const projects = features.map(f => f.projectName);
     return Array.from(new Set(projects)).sort();
   }, [features]);
 
   const filteredFeatures = useMemo(() => {
-    let result = features.filter(f => 
-      f.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
-      f.projectName.toLowerCase().includes(searchTerm.toLowerCase())
-    );
+    return features.filter(f => {
+      // 1. Search Term
+      const matchesSearch = f.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
+                            f.projectName.toLowerCase().includes(searchTerm.toLowerCase());
+      if (!matchesSearch) return false;
 
-    if (activeTeamFilter !== 'ALL') {
-      result = result.filter(f => f.teamStatuses[activeTeamFilter] !== TaskStatus.NONE);
-    }
+      // 2. Team Filter (Visibility)
+      if (activeTeamFilter !== 'ALL' && f.teamStatuses[activeTeamFilter] === TaskStatus.NONE) {
+        return false;
+      }
 
-    return result;
-  }, [features, searchTerm, activeTeamFilter]);
+      // 3. Project Filter
+      if (filterProject !== 'ALL' && f.projectName !== filterProject) return false;
+
+      // 4. Priority Filter
+      if (filterPriority !== 'ALL' && !f.priority.startsWith(filterPriority)) return false;
+
+      // 5. Status Filter (New Logic)
+      if (filterStatus !== 'ALL') {
+        const featureStage = getFeatureStage(f);
+        if (featureStage !== filterStatus) return false;
+      }
+
+      return true;
+    });
+  }, [features, searchTerm, activeTeamFilter, filterProject, filterPriority, filterStatus]);
 
   const handleCreateFeature = (newFeatureData: Omit<Feature, 'id'>) => {
     const newFeature: Feature = {
@@ -119,12 +196,73 @@ const App: React.FC = () => {
     return Math.round((completed / relevantTeams) * 100);
   };
 
+  const handleExportExcel = () => {
+    const headers = [
+      'پروژه',
+      'نام فیچر',
+      'اولویت',
+      'توضیحات',
+      ...TEAMS_ORDER,
+      'مرحله',
+      'پیشرفت'
+    ];
+
+    const escapeCsv = (data: any) => {
+        if (data === null || data === undefined) return '';
+        const str = data.toString();
+        if (str.includes(',') || str.includes('"') || str.includes('\n')) {
+            return `"${str.replace(/"/g, '""')}"`;
+        }
+        return str;
+    };
+
+    const rows = filteredFeatures.map(f => {
+      const teamStatuses = TEAMS_ORDER.map(t => {
+        const s = f.teamStatuses[t];
+        switch (s) {
+            case TaskStatus.COMPLETED: return 'تکمیل شده';
+            case TaskStatus.IN_PROGRESS: return 'در حال انجام';
+            case TaskStatus.WAITING: return 'در انتظار';
+            case TaskStatus.BLOCKED: return 'بلاک شده';
+            default: return '-';
+        }
+      });
+
+      return [
+        f.projectName,
+        f.name,
+        f.priority,
+        f.description,
+        ...teamStatuses,
+        getStageLabel(getFeatureStage(f)),
+        `${calculateOverallProgress(f)}%`
+      ].map(escapeCsv).join(',');
+    });
+
+    // Add BOM for Excel UTF-8 compatibility
+    const csvContent = '\uFEFF' + [headers.join(','), ...rows].join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', `proflow_export_${new Date().toISOString().slice(0,10)}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
   const statsData = useMemo(() => {
     let completed = 0, inProgress = 0, waiting = 0, blocked = 0, total = 0;
     
     features.forEach(f => {
+      // Filter stats based on current filters to reflect what is seen on screen
+      if (filterProject !== 'ALL' && f.projectName !== filterProject) return;
+      if (filterPriority !== 'ALL' && !f.priority.startsWith(filterPriority)) return;
+      if (filterStatus !== 'ALL' && getFeatureStage(f) !== filterStatus) return;
+
       Object.entries(f.teamStatuses).forEach(([team, s]) => {
         if (activeTeamFilter !== 'ALL' && team !== activeTeamFilter) return;
+        
         if (s === TaskStatus.NONE) return;
         
         total++;
@@ -141,7 +279,7 @@ const App: React.FC = () => {
       { name: 'در انتظار', value: waiting, color: '#f59e0b' },
       { name: 'بلاک شده', value: blocked, color: '#f43f5e' },
     ];
-  }, [features, activeTeamFilter]);
+  }, [features, activeTeamFilter, filterProject, filterPriority, filterStatus]);
 
   const getPriorityStyles = (priority: string) => {
     const char = priority.charAt(0).toUpperCase();
@@ -165,7 +303,8 @@ const App: React.FC = () => {
 
   return (
     <div className="min-h-screen bg-[#f1f5f9] text-slate-900 pb-20">
-      <header className="bg-white border-b border-gray-200 sticky top-0 z-40 shadow-sm">
+      {/* Unified Sticky Header Container */}
+      <div className="sticky top-0 z-40 bg-white border-b border-gray-200 shadow-sm transition-all">
         <div className="max-w-[1600px] mx-auto px-4 md:px-8 py-4 flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 bg-indigo-600 rounded-xl flex items-center justify-center shadow-lg shadow-indigo-100">
@@ -180,7 +319,7 @@ const App: React.FC = () => {
           </div>
 
           <div className="flex items-center gap-3">
-            <div className="relative">
+            <div className="relative flex-1 md:flex-none">
               <input 
                 type="text"
                 placeholder="جستجو فیچر..."
@@ -192,43 +331,117 @@ const App: React.FC = () => {
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
               </svg>
             </div>
+
+            <button
+              onClick={() => setShowFilters(!showFilters)}
+              className={`p-2.5 rounded-2xl transition-all border ${showFilters ? 'bg-indigo-50 border-indigo-200 text-indigo-600' : 'bg-white border-slate-200 text-slate-500 hover:bg-slate-50'}`}
+              title="فیلترها"
+            >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z" />
+              </svg>
+            </button>
+
+            <button
+              onClick={handleExportExcel}
+              className="p-2.5 rounded-2xl bg-white border border-slate-200 text-slate-500 hover:bg-emerald-50 hover:text-emerald-600 hover:border-emerald-200 transition-all"
+              title="دانلود اکسل"
+            >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+              </svg>
+            </button>
+
             <button 
               onClick={() => setIsCreateModalOpen(true)}
-              className="flex items-center gap-2 px-5 py-2.5 bg-indigo-600 text-white rounded-2xl font-bold text-xs shadow-lg shadow-indigo-200 hover:bg-indigo-700 active:scale-95 transition-all"
+              className="flex items-center gap-2 px-4 py-2.5 bg-indigo-600 text-white rounded-2xl font-bold text-xs shadow-lg shadow-indigo-200 hover:bg-indigo-700 active:scale-95 transition-all"
             >
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M12 4v16m8-8H4" /></svg>
-              فیچر جدید
+              <span className="hidden sm:inline">فیچر جدید</span>
             </button>
+
             <button 
               onClick={handleAnalyze}
               disabled={isAnalyzing}
-              className={`flex items-center gap-2 px-5 py-2.5 rounded-2xl font-bold text-xs transition-all ${isAnalyzing ? 'bg-slate-100 text-slate-400' : 'bg-slate-800 text-white hover:bg-black shadow-lg shadow-slate-200 active:scale-95'}`}
+              className={`flex items-center gap-2 px-4 py-2.5 rounded-2xl font-bold text-xs transition-all ${isAnalyzing ? 'bg-slate-100 text-slate-400' : 'bg-slate-800 text-white hover:bg-black shadow-lg shadow-slate-200 active:scale-95'}`}
             >
-              {isAnalyzing ? <div className="w-3.5 h-3.5 border-2 border-slate-300 border-t-white rounded-full animate-spin"></div> : 'تحلیل هوشمند'}
+              {isAnalyzing ? <div className="w-3.5 h-3.5 border-2 border-slate-300 border-t-white rounded-full animate-spin"></div> : <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>}
+              <span className="hidden sm:inline">تحلیل</span>
             </button>
           </div>
         </div>
-      </header>
 
-      {/* Team Filter Bar */}
-      <div className="bg-white border-b border-slate-200 sticky top-[73px] z-30">
-        <div className="max-w-[1600px] mx-auto px-4 md:px-8 py-3 overflow-x-auto custom-scrollbar flex items-center gap-2 no-scrollbar">
-          <button
-            onClick={() => setActiveTeamFilter('ALL')}
-            className={`px-5 py-2 rounded-xl text-xs font-bold transition-all whitespace-nowrap ${activeTeamFilter === 'ALL' ? 'bg-indigo-100 text-indigo-700' : 'text-slate-500 hover:bg-slate-50'}`}
-          >
-            همه فیچرها
-          </button>
-          <div className="w-px h-4 bg-slate-200 mx-1"></div>
-          {TEAMS_ORDER.map(team => (
+        {/* Filters Panel */}
+        {showFilters && (
+          <div className="max-w-[1600px] mx-auto px-4 md:px-8 pb-4 animate-in slide-in-from-top-2 duration-200">
+            <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div className="space-y-1">
+                <label className="text-[10px] font-black text-slate-400 uppercase mr-1">پروژه</label>
+                <select 
+                  className="w-full bg-white border border-slate-200 text-slate-700 text-xs rounded-xl px-3 py-2.5 focus:outline-none focus:ring-2 focus:ring-indigo-500 transition-all font-bold"
+                  value={filterProject}
+                  onChange={(e) => setFilterProject(e.target.value)}
+                >
+                  <option value="ALL">همه پروژه‌ها</option>
+                  {availableProjects.map(p => (
+                    <option key={p} value={p}>{p}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-[10px] font-black text-slate-400 uppercase mr-1">اولویت</label>
+                <select 
+                  className="w-full bg-white border border-slate-200 text-slate-700 text-xs rounded-xl px-3 py-2.5 focus:outline-none focus:ring-2 focus:ring-indigo-500 transition-all font-bold"
+                  value={filterPriority}
+                  onChange={(e) => setFilterPriority(e.target.value)}
+                >
+                  <option value="ALL">همه اولویت‌ها</option>
+                  <option value="A">بالا (A)</option>
+                  <option value="B">متوسط (B)</option>
+                  <option value="C">پایین (C)</option>
+                </select>
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-[10px] font-black text-slate-400 uppercase mr-1">وضعیت فیچر (مرحله)</label>
+                <select 
+                  className="w-full bg-white border border-slate-200 text-slate-700 text-xs rounded-xl px-3 py-2.5 focus:outline-none focus:ring-2 focus:ring-indigo-500 transition-all font-bold"
+                  value={filterStatus}
+                  onChange={(e) => setFilterStatus(e.target.value)}
+                >
+                  <option value="ALL">همه وضعیت‌ها</option>
+                  <option value="WAITING">در انتظار (شروع نشده)</option>
+                  <option value="PRODUCT_DESIGN">محصول و دیزاین</option>
+                  <option value="IMPLEMENTATION">پیاده‌سازی (Dev)</option>
+                  <option value="TEST">تست و انتشار (QA)</option>
+                  <option value="COMPLETED">تکمیل شده</option>
+                </select>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Team Filter Bar */}
+        <div className="border-t border-slate-100 bg-white/50 backdrop-blur-sm">
+          <div className="max-w-[1600px] mx-auto px-4 md:px-8 py-3 overflow-x-auto custom-scrollbar flex items-center gap-2 no-scrollbar">
             <button
-              key={team}
-              onClick={() => setActiveTeamFilter(team)}
-              className={`px-5 py-2 rounded-xl text-xs font-bold transition-all whitespace-nowrap ${activeTeamFilter === team ? 'bg-indigo-600 text-white shadow-md shadow-indigo-100' : 'text-slate-500 hover:bg-slate-50'}`}
+              onClick={() => setActiveTeamFilter('ALL')}
+              className={`px-5 py-2 rounded-xl text-xs font-bold transition-all whitespace-nowrap ${activeTeamFilter === 'ALL' ? 'bg-indigo-100 text-indigo-700' : 'text-slate-500 hover:bg-slate-50'}`}
             >
-              تیم {team}
+              همه فیچرها
             </button>
-          ))}
+            <div className="w-px h-4 bg-slate-200 mx-1"></div>
+            {TEAMS_ORDER.map(team => (
+              <button
+                key={team}
+                onClick={() => setActiveTeamFilter(team)}
+                className={`px-5 py-2 rounded-xl text-xs font-bold transition-all whitespace-nowrap ${activeTeamFilter === team ? 'bg-indigo-600 text-white shadow-md shadow-indigo-100' : 'text-slate-500 hover:bg-slate-50'}`}
+              >
+                تیم {team}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
 
@@ -246,7 +459,11 @@ const App: React.FC = () => {
               </ResponsiveContainer>
             </div>
             <div className="flex-1 space-y-2">
-              <h3 className="font-bold text-slate-700 mb-2 text-xs">توزیع وضعیت {activeTeamFilter === 'ALL' ? 'کل' : `تیم ${activeTeamFilter}`}</h3>
+              <h3 className="font-bold text-slate-700 mb-2 text-xs">
+                آمار کلی 
+                {activeTeamFilter !== 'ALL' && ` (تیم ${activeTeamFilter})`}
+                {(filterProject !== 'ALL' || filterPriority !== 'ALL' || filterStatus !== 'ALL') && ' [فیلتر شده]'}
+              </h3>
               {statsData.map((s, i) => (
                 <div key={i} className="flex items-center justify-between text-[11px]">
                   <div className="flex items-center gap-2">
@@ -314,13 +531,21 @@ const App: React.FC = () => {
                         <div className="w-full bg-slate-100 rounded-full h-1.5 overflow-hidden">
                           <div className={`h-full transition-all duration-1000 ${calculateOverallProgress(feature) === 100 ? 'bg-emerald-500' : 'bg-indigo-500'}`} style={{ width: `${calculateOverallProgress(feature)}%` }}></div>
                         </div>
-                        <span className="text-[10px] font-black text-slate-600">%{calculateOverallProgress(feature)}</span>
+                        <div className="flex justify-between w-full">
+                           <span className="text-[9px] font-bold text-slate-400">{getStageLabel(getFeatureStage(feature))}</span>
+                           <span className="text-[10px] font-black text-slate-600">%{calculateOverallProgress(feature)}</span>
+                        </div>
                       </div>
                     </td>
                   </tr>
                 ))}
               </tbody>
             </table>
+            {filteredFeatures.length === 0 && (
+              <div className="p-12 text-center text-slate-400 text-sm font-medium">
+                هیچ فیچری با این مشخصات یافت نشد.
+              </div>
+            )}
           </div>
         </div>
       </main>
